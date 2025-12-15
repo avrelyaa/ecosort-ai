@@ -1,15 +1,12 @@
 """
 EcoSort AI - Streamlit Web Application
-Interactive E-Waste Detection System using Claude API
+Interactive E-Waste Detection System
 """
 
 import streamlit as st
 import numpy as np
 from PIL import Image
 import time
-import base64
-import io
-import json
 
 # Page configuration
 st.set_page_config(
@@ -19,7 +16,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
@@ -62,7 +59,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# E-waste information database
+# Configuration
+IMG_SIZE = 224
+MODEL_PATH = 'ecosort_best_model.h5'
+
+# E-waste information
 EWASTE_INFO = {
     'dangers': [
         "🔴 Contains toxic heavy metals like lead, mercury, and cadmium",
@@ -109,96 +110,88 @@ EWASTE_INFO = {
     }
 }
 
-def image_to_base64(image):
-    """Convert PIL Image to base64 string"""
-    buffered = io.BytesIO()
-    image.save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-    return img_str
-
-async def classify_with_claude(image):
-    """Classify image using Claude API"""
-    import aiohttp
-    
-    # Convert image to base64
-    base64_image = image_to_base64(image)
-    
-    # Prepare API request
-    url = "https://api.anthropic.com/v1/messages"
-    headers = {
-        "Content-Type": "application/json",
-        "anthropic-version": "2023-06-01"
-    }
-    
-    payload = {
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 1000,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
-                            "data": base64_image
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": """Analyze this image and determine if it contains e-waste (electronic waste). 
-E-waste includes items like computers, phones, batteries, circuit boards, monitors, keyboards, cables, printers, and other electronic devices or components.
-
-Respond ONLY with a JSON object in this exact format (no markdown, no backticks):
-{
-  "isEWaste": true or false,
-  "confidence": "high" or "medium" or "low",
-  "itemType": "specific item name or null",
-  "reasoning": "brief explanation"
-}"""
-                    }
-                ]
-            }
-        ]
-    }
-    
+@st.cache_resource
+def load_model():
+    """Load model with proper architecture reconstruction"""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    text = "".join([block["text"] for block in data["content"] if block["type"] == "text"])
-                    # Clean and parse JSON
-                    clean_text = text.replace("```json", "").replace("```", "").strip()
-                    result = json.loads(clean_text)
-                    return result, None
-                else:
-                    error_text = await response.text()
-                    return None, f"API Error: {response.status} - {error_text}"
+        import tensorflow as tf
+        from tensorflow import keras
+        from tensorflow.keras import layers
+        import h5py
+        
+        # First, try to load the weights file
+        with h5py.File(MODEL_PATH, 'r') as f:
+            # Check if file is valid
+            if 'model_weights' not in f.keys() and 'model_config' not in f.keys():
+                st.info("Creating model architecture from scratch...")
+        
+        # Rebuild the exact architecture
+        base_model = keras.applications.MobileNetV2(
+            input_shape=(IMG_SIZE, IMG_SIZE, 3),
+            include_top=False,
+            weights='imagenet'
+        )
+        base_model.trainable = False
+        
+        # Build model
+        inputs = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+        x = base_model(inputs, training=False)
+        x = layers.GlobalAveragePooling2D()(x)
+        x = layers.Dropout(0.3)(x)
+        x = layers.Dense(128, activation='relu')(x)
+        x = layers.Dropout(0.2)(x)
+        outputs = layers.Dense(1, activation='sigmoid')(x)
+        
+        model = keras.Model(inputs, outputs)
+        
+        # Try to load weights
+        try:
+            model.load_weights(MODEL_PATH)
+            st.success("✅ Model loaded successfully with weights!")
+        except:
+            st.warning("⚠️ Using model with ImageNet weights only (no custom training)")
+        
+        return model, None
+        
     except Exception as e:
         return None, str(e)
 
-def display_confidence_meter(confidence_str):
-    """Display confidence as a progress bar"""
+def preprocess_image(image):
+    """Preprocess image for model"""
+    img = image.resize((IMG_SIZE, IMG_SIZE))
+    img_array = np.array(img, dtype=np.float32) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
+    return img_array
+
+def classify_image(model, image):
+    """Classify image"""
+    img_array = preprocess_image(image)
+    prediction = model.predict(img_array, verbose=0)[0][0]
+    
+    is_ewaste = prediction > 0.5
+    confidence = prediction if is_ewaste else (1 - prediction)
+    
+    return {
+        'is_ewaste': bool(is_ewaste),
+        'confidence': float(confidence),
+        'raw_prediction': float(prediction)
+    }
+
+def display_confidence_meter(confidence):
+    """Display confidence meter"""
     st.markdown("### Confidence Level")
     
-    # Convert string to number
-    confidence_map = {"high": 0.9, "medium": 0.7, "low": 0.5}
-    confidence = confidence_map.get(confidence_str.lower(), 0.5)
-    
-    # Color based on confidence
     if confidence > 0.8:
-        st.success(f"**High Confidence**")
+        st.success(f"**High Confidence: {confidence*100:.1f}%**")
     elif confidence > 0.6:
-        st.warning(f"**Medium Confidence**")
+        st.warning(f"**Medium Confidence: {confidence*100:.1f}%**")
     else:
-        st.error(f"**Low Confidence**")
+        st.error(f"**Low Confidence: {confidence*100:.1f}%**")
     
     st.progress(confidence)
 
 def main():
-    """Main Streamlit application"""
+    """Main app"""
     
     # Header
     st.markdown('<h1 class="main-header">♻️ EcoSort AI</h1>', unsafe_allow_html=True)
@@ -218,8 +211,8 @@ def main():
         st.metric("Recovery Rate Possible", "95%")
         
         st.markdown("### 🎯 Model Info")
-        st.write("- **AI Model:** Claude Sonnet 4")
-        st.write("- **Detection:** Real-time Vision AI")
+        st.write("- **Architecture:** MobileNetV2")
+        st.write("- **Input Size:** 224x224")
         st.write("- **Classes:** Binary (E-waste/Not)")
         
         st.markdown("---")
@@ -232,58 +225,37 @@ def main():
     with col1:
         st.markdown("### 📤 Upload Image")
         
-        # File uploader
         uploaded_file = st.file_uploader(
             "Choose an image...",
             type=['jpg', 'jpeg', 'png'],
             help="Upload an image of waste to classify"
         )
         
-        # Camera input option
         st.markdown("#### Or use your camera:")
         camera_image = st.camera_input("Take a picture")
         
-        # Use whichever input is available
         image_source = uploaded_file if uploaded_file else camera_image
         
         if image_source:
-            # Display uploaded image
             image = Image.open(image_source).convert('RGB')
             st.image(image, caption="Uploaded Image", use_container_width=True)
             
-            # Analyze button
             if st.button("🔍 Analyze Image", type="primary"):
-                # Show progress
-                with st.spinner('Analyzing image with AI...'):
+                model, error = load_model()
+                
+                if error:
+                    st.error(f"❌ Error loading model: {error}")
+                    return
+                
+                with st.spinner('Analyzing image...'):
                     progress_bar = st.progress(0)
+                    for i in range(100):
+                        time.sleep(0.01)
+                        progress_bar.progress(i + 1)
                     
-                    # Simulate progress while waiting for API
-                    import asyncio
-                    
-                    async def analyze():
-                        for i in range(30):
-                            await asyncio.sleep(0.03)
-                            progress_bar.progress((i + 1) * 3)
-                        
-                        # Call Claude API
-                        result, error = await classify_with_claude(image)
-                        
-                        for i in range(30, 100):
-                            await asyncio.sleep(0.01)
-                            progress_bar.progress(i + 1)
-                        
-                        return result, error
-                    
-                    # Run async function
-                    result, error = asyncio.run(analyze())
-                    
-                    if error:
-                        st.error(f"❌ Error: {error}")
-                        st.info("💡 Tip: Make sure the API is accessible and the image is clear.")
-                    else:
-                        # Store result in session state
-                        st.session_state['result'] = result
-                        st.rerun()
+                    result = classify_image(model, image)
+                    st.session_state['result'] = result
+                    st.rerun()
     
     with col2:
         st.markdown("### 📊 Results")
@@ -291,8 +263,7 @@ def main():
         if 'result' in st.session_state:
             result = st.session_state['result']
             
-            # Display result
-            if result.get('isEWaste', False):
+            if result['is_ewaste']:
                 st.markdown(
                     '<div class="ewaste-alert">'
                     '<h2>⚠️ E-WASTE DETECTED</h2>'
@@ -309,20 +280,11 @@ def main():
                     unsafe_allow_html=True
                 )
             
-            # Show item type and reasoning
-            if result.get('itemType'):
-                st.info(f"**Detected Item:** {result['itemType']}")
+            display_confidence_meter(result['confidence'])
             
-            st.write(f"**Analysis:** {result.get('reasoning', 'No additional information')}")
-            
-            # Confidence meter
-            display_confidence_meter(result.get('confidence', 'medium'))
-            
-            # Detailed information for e-waste
-            if result.get('isEWaste', False):
+            if result['is_ewaste']:
                 st.markdown("---")
                 
-                # Tabs for different information
                 tab1, tab2, tab3 = st.tabs(["⚠️ Dangers", "♻️ Disposal", "💎 Materials"])
                 
                 with tab1:
@@ -347,7 +309,6 @@ def main():
         else:
             st.info("👆 Upload an image to get started!")
             
-            # Show examples
             st.markdown("### 📋 What is E-Waste?")
             
             col_a, col_b = st.columns(2)
@@ -362,7 +323,6 @@ def main():
                 for item in EWASTE_INFO['examples']['non_ewaste']:
                     st.markdown(f"- {item}")
     
-    # Footer
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #666;'>"
