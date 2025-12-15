@@ -1,4 +1,5 @@
 streamlit
+tensorflow
 pillow
 numpy
-aiohttp
+h5py
