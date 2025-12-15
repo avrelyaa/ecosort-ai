@@ -4,8 +4,6 @@ Interactive E-Waste Detection System
 """
 
 import streamlit as st
-import tensorflow as tf
-from tensorflow import keras
 import numpy as np
 from PIL import Image
 import time
@@ -116,10 +114,23 @@ EWASTE_INFO = {
 def load_model():
     """Load the trained model (cached)"""
     try:
+        # Try importing tensorflow
+        import tensorflow as tf
+        from tensorflow import keras
         model = keras.models.load_model(MODEL_PATH)
-        return model, None
+        return model, None, "tensorflow"
+    except ImportError:
+        st.warning("⚠️ TensorFlow not available. Trying TensorFlow Lite...")
+        try:
+            # Try TensorFlow Lite
+            import tensorflow as tf
+            interpreter = tf.lite.Interpreter(model_path=MODEL_PATH.replace('.h5', '.tflite'))
+            interpreter.allocate_tensors()
+            return interpreter, None, "tflite"
+        except Exception as e:
+            return None, str(e), None
     except Exception as e:
-        return None, str(e)
+        return None, str(e), None
 
 def preprocess_image(image):
     """Preprocess image for model input"""
@@ -127,20 +138,30 @@ def preprocess_image(image):
     img = image.resize((IMG_SIZE, IMG_SIZE))
     
     # Convert to array and normalize
-    img_array = np.array(img) / 255.0
+    img_array = np.array(img, dtype=np.float32) / 255.0
     
     # Add batch dimension
     img_array = np.expand_dims(img_array, axis=0)
     
     return img_array
 
-def classify_image(model, image):
+def classify_image(model, image, model_type):
     """Classify an image as e-waste or not"""
     # Preprocess
     img_array = preprocess_image(image)
     
-    # Predict
-    prediction = model.predict(img_array, verbose=0)[0][0]
+    # Predict based on model type
+    if model_type == "tensorflow":
+        prediction = model.predict(img_array, verbose=0)[0][0]
+    elif model_type == "tflite":
+        # TensorFlow Lite inference
+        input_details = model.get_input_details()
+        output_details = model.get_output_details()
+        model.set_tensor(input_details[0]['index'], img_array)
+        model.invoke()
+        prediction = model.get_tensor(output_details[0]['index'])[0][0]
+    else:
+        prediction = 0.5  # Default
     
     # Determine classification
     is_ewaste = prediction > 0.5
@@ -223,11 +244,30 @@ def main():
             # Analyze button
             if st.button("🔍 Analyze Image", type="primary"):
                 # Load model
-                model, error = load_model()
+                model, error, model_type = load_model()
                 
                 if error:
                     st.error(f"❌ Error loading model: {error}")
-                    st.warning("Make sure 'ecosort_best_model.h5' exists in the current directory.")
+                    st.warning("Please check the following:")
+                    st.code("""
+1. Make sure 'ecosort_best_model.h5' exists in your repository
+2. Check if the file uploaded correctly to GitHub
+3. Try re-uploading the model file
+4. Check Streamlit Cloud logs for detailed error
+                    """)
+                    
+                    # Show system info for debugging
+                    with st.expander("🔧 Debug Information"):
+                        import sys
+                        import os
+                        st.write("**Python Version:**", sys.version)
+                        st.write("**Current Directory:**", os.getcwd())
+                        st.write("**Files in Directory:**")
+                        try:
+                            files = os.listdir('.')
+                            st.write(files)
+                        except:
+                            st.write("Could not list files")
                     return
                 
                 # Show progress
@@ -238,7 +278,7 @@ def main():
                         progress_bar.progress(i + 1)
                     
                     # Classify
-                    result = classify_image(model, image)
+                    result = classify_image(model, image, model_type)
                     
                     # Store result in session state
                     st.session_state['result'] = result
